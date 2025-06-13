@@ -1,91 +1,77 @@
 #!/bin/bash -ex
-# Script para instalar WordPress + phpMyAdmin en Amazon Linux 2/2023
+# Script para instalar WordPress + phpMyAdmin en Ubuntu Server
 
 # --- PERSONALIZA TU CONFIGURACIÓN AQUÍ ---
-# ADVERTENCIA: Usar contraseñas fijas es un riesgo de seguridad.
-# Se recomienda solo para entornos de prueba o desarrollo.
-
 DB_NAME="dbwordpress"
 DB_USER="admin"
 DB_PASS="Tecsup00--"
-
 # --- FIN DE LA ZONA DE PERSONALIZACIÓN ---
 
+# Actualizar sistema
+sudo apt-get update -y
+sudo apt-get upgrade -y
 
-# --- Instalación de la Pila de Software ---
-# Actualizar todos los paquetes del sistema
-yum update -y
+# Instalar Apache, MySQL Server y PHP con módulos necesarios
+sudo apt-get install -y apache2 mysql-server php php-mysql php-gd php-xml php-mbstring wget unzip curl
 
-# Instalar Apache, MySQL Community Server 8 y PHP con los módulos necesarios
-if ! rpm -q mysql-community-server; then
-    if cat /etc/os-release | grep -q "Amazon Linux 2"; then
-        wget https://dev.mysql.com/get/mysql80-community-release-el7-3.noarch.rpm
-        yum localinstall mysql80-community-release-el7-3.noarch.rpm -y
-        rm mysql80-community-release-el7-3.noarch.rpm
-    fi
-fi
-yum install -y httpd mysql-community-server php php-mysqlnd php-gd php-xml php-mbstring
+# Instalar phpMyAdmin (no interactivo)
+sudo debconf-set-selections <<< "phpmyadmin phpmyadmin/dbconfig-install boolean true"
+sudo debconf-set-selections <<< "phpmyadmin phpmyadmin/app-password-confirm password ${DB_PASS}"
+sudo debconf-set-selections <<< "phpmyadmin phpmyadmin/mysql/admin-pass password ${DB_PASS}"
+sudo debconf-set-selections <<< "phpmyadmin phpmyadmin/mysql/app-pass password ${DB_PASS}"
+sudo debconf-set-selections <<< "phpmyadmin phpmyadmin/reconfigure-webserver multiselect apache2"
+sudo apt-get install -y phpmyadmin
 
-# Habilitar el repositorio EPEL para instalar phpMyAdmin
-if cat /etc/os-release | grep -q "Amazon Linux 2023"; then
-    dnf install -y epel-release
-else
-    amazon-linux-extras install epel -y
-fi
-yum install -y phpmyadmin
-
+# Habilitar el módulo PHP para Apache y reiniciar
+sudo phpenmod mbstring
+sudo systemctl restart apache2
 
 # --- Configuración de la Base de Datos ---
-# Iniciar y habilitar servicios
-systemctl start httpd
-systemctl enable httpd
-systemctl start mysqld
-systemctl enable mysqld
-
-# Obtener la contraseña temporal de root de MySQL
-TEMP_ROOT_PASSWORD=$(grep 'temporary password' /var/log/mysqld.log | sed 's/.*root@localhost: //')
-
-# Automatizar la configuración de la base de datos usando las variables personalizadas
-mysql -u root --password="$TEMP_ROOT_PASSWORD" --connect-expired-password <<EOF
-ALTER USER 'root'@'localhost' IDENTIFIED BY '${DB_PASS}';
-CREATE DATABASE ${DB_NAME} CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci;
-CREATE USER '${DB_USER}'@'localhost' IDENTIFIED BY '${DB_PASS}';
+# Configurar MySQL: crear la base de datos y el usuario
+sudo mysql <<EOF
+ALTER USER 'root'@'localhost' IDENTIFIED WITH mysql_native_password BY '${DB_PASS}';
+CREATE DATABASE IF NOT EXISTS ${DB_NAME} CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci;
+CREATE USER IF NOT EXISTS '${DB_USER}'@'localhost' IDENTIFIED BY '${DB_PASS}';
 GRANT ALL PRIVILEGES ON ${DB_NAME}.* TO '${DB_USER}'@'localhost';
 FLUSH PRIVILEGES;
 EOF
 
-
 # --- Instalación y Configuración de WordPress ---
 cd /var/www/html
-wget https://wordpress.org/latest.tar.gz
-tar -xzf latest.tar.gz
-mv wordpress/* .
-rmdir wordpress
-rm latest.tar.gz
+sudo rm -rf index.html
+sudo wget https://wordpress.org/latest.tar.gz
+sudo tar -xzf latest.tar.gz
+sudo mv wordpress/* .
+sudo rmdir wordpress
+sudo rm latest.tar.gz
 
-# Crear y configurar wp-config.php con las variables personalizadas
-cp wp-config-sample.php wp-config.php
-sed -i "s/database_name_here/$DB_NAME/" wp-config.php
-sed -i "s/username_here/$DB_USER/" wp-config.php
-sed -i "s/password_here/$DB_PASS/" wp-config.php
+# Crear y configurar wp-config.php
+sudo cp wp-config-sample.php wp-config.php
+sudo sed -i "s/database_name_here/$DB_NAME/" wp-config.php
+sudo sed -i "s/username_here/$DB_USER/" wp-config.php
+sudo sed -i "s/password_here/$DB_PASS/" wp-config.php
 
 # Insertar claves de seguridad únicas de la API de WordPress.org
 SALT=$(curl -L https://api.wordpress.org/secret-key/1.1/salt/)
-STRING='put your unique phrase here'
-printf '%s\n' "g/$STRING/d" a "$SALT" . w | ed -s wp-config.php
-
+sudo sed -i "/AUTH_KEY/d" wp-config.php
+sudo sed -i "/SECURE_AUTH_KEY/d" wp-config.php
+sudo sed -i "/LOGGED_IN_KEY/d" wp-config.php
+sudo sed -i "/NONCE_KEY/d" wp-config.php
+sudo sed -i "/AUTH_SALT/d" wp-config.php
+sudo sed -i "/SECURE_AUTH_SALT/d" wp-config.php
+sudo sed -i "/LOGGED_IN_SALT/d" wp-config.php
+sudo sed -i "/NONCE_SALT/d" wp-config.php
+echo "$SALT" | sudo tee -a wp-config.php
 
 # --- Configuración de phpMyAdmin ---
-# Permitir el acceso a phpMyAdmin desde cualquier dirección IP
-sed -i 's/Require ip 127.0.0.1/Require all granted/' /etc/httpd/conf.d/phpMyAdmin.conf
-sed -i 's/Require ip ::1/ /' /etc/httpd/conf.d/phpMyAdmin.conf
+# Hacer que phpMyAdmin sea accesible desde cualquier IP
+sudo sed -i "s/Require local/Require all granted/" /etc/apache2/conf-available/phpmyadmin.conf
+sudo ln -s /etc/apache2/conf-available/phpmyadmin.conf /etc/apache2/conf-enabled/phpmyadmin.conf || true
+sudo systemctl reload apache2
 
+# --- Permisos Finales ---
+sudo chown -R www-data:www-data /var/www/html/
+sudo find /var/www/html/ -type d -exec chmod 755 {} \;
+sudo find /var/www/html/ -type f -exec chmod 644 {} \;
 
-# --- Permisos Finales y Reinicio ---
-# Establecer propietario y permisos correctos para los archivos web
-chown -R apache:apache /var/www/html/
-find /var/www/html/ -type d -exec chmod 755 {} \;
-find /var/www/html/ -type f -exec chmod 644 {} \;
-
-# Reiniciar Apache para que todos los cambios surtan efecto
-systemctl restart httpd
+echo "Instalación completa. Accede a WordPress en http://<tu-ip-publica> y a phpMyAdmin en http://<tu-ip-publica>/phpmyadmin"
